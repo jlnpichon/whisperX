@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
 from pyannote.audio import Pipeline
-from typing import Optional, Union
+from pyannote.audio.pipelines.utils.hook import ProgressHook
+from typing import Optional, Callable, Union
 import torch
 
 from .audio import load_audio, SAMPLE_RATE
@@ -14,10 +15,12 @@ class DiarizationPipeline:
         model_name="pyannote/speaker-diarization-3.1",
         use_auth_token=None,
         device: Optional[Union[str, torch.device]] = "cpu",
+        progress_callback=None,
     ):
         if isinstance(device, str):
             device = torch.device(device)
         self.model = Pipeline.from_pretrained(model_name, use_auth_token=use_auth_token).to(device)
+        self.progress_callback = progress_callback
 
     def __call__(
         self,
@@ -32,7 +35,7 @@ class DiarizationPipeline:
             'waveform': torch.from_numpy(audio[None, :]),
             'sample_rate': SAMPLE_RATE
         }
-        segments = self.model(audio_data, num_speakers = num_speakers, min_speakers=min_speakers, max_speakers=max_speakers)
+        segments = self.model(audio_data, num_speakers = num_speakers, min_speakers=min_speakers, max_speakers=max_speakers, hook=self.progress_callback)
         diarize_df = pd.DataFrame(segments.itertracks(yield_label=True), columns=['segment', 'label', 'speaker'])
         diarize_df['start'] = diarize_df['segment'].apply(lambda x: x.start)
         diarize_df['end'] = diarize_df['segment'].apply(lambda x: x.end)
@@ -43,9 +46,14 @@ def assign_word_speakers(
     diarize_df: pd.DataFrame,
     transcript_result: Union[AlignedTranscriptionResult, TranscriptionResult],
     fill_nearest=False,
+    progress_callback: Optional[Callable[[float], None]] = None
 ) -> dict:
     transcript_segments = transcript_result["segments"]
-    for seg in transcript_segments:
+    transcripts_segments_count = len(transcript_segments)
+    for idx, seg in enumerate(transcript_segments):
+        if progress_callback:
+            base_progress = ((idx + 1) / transcripts_segments_count) * 100
+            progress_callback(base_progress)
         # assign speaker to segment (if any)
         diarize_df['intersection'] = np.minimum(diarize_df['end'], seg['end']) - np.maximum(diarize_df['start'], seg['start'])
         diarize_df['union'] = np.maximum(diarize_df['end'], seg['end']) - np.minimum(diarize_df['start'], seg['start'])
